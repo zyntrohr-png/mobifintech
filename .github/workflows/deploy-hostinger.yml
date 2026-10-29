@@ -1,0 +1,146 @@
+name: Test and deploy to Hostinger
+
+on:
+  push:
+    branches:
+      - staging
+      - production
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hostinger-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_sqlite, sqlite3
+          coverage: none
+
+      - name: Install Composer dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
+
+      - name: Prepare test environment
+        run: |
+          cp .env.example .env
+          touch database/database.sqlite
+          php artisan key:generate
+
+      - name: Run tests
+        run: php artisan test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.ref_name }}
+    steps:
+      - name: Explain skipped deployment
+        if: ${{ vars.HOSTINGER_APP_PATH == '' }}
+        run: |
+          echo "::notice::Tests passed. Deployment was skipped because HOSTINGER_APP_PATH is not configured in this GitHub Environment."
+
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up PHP
+        if: ${{ vars.HOSTINGER_APP_PATH != '' }}
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: '8.4'
+          coverage: none
+
+      - name: Install production dependencies
+        if: ${{ vars.HOSTINGER_APP_PATH != '' }}
+        run: composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+
+      - name: Configure SSH and validate deployment target
+        if: ${{ vars.HOSTINGER_APP_PATH != '' }}
+        env:
+          SSH_HOST: ${{ secrets.HOSTINGER_SSH_HOST }}
+          SSH_USER: ${{ secrets.HOSTINGER_SSH_USER }}
+          SSH_PORT: ${{ secrets.HOSTINGER_SSH_PORT }}
+          SSH_PRIVATE_KEY: ${{ secrets.HOSTINGER_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.HOSTINGER_SSH_KNOWN_HOSTS }}
+          APP_PATH: ${{ vars.HOSTINGER_APP_PATH }}
+        run: |
+          set -euo pipefail
+          : "${SSH_HOST:?Set HOSTINGER_SSH_HOST in this GitHub Environment}"
+          : "${SSH_USER:?Set HOSTINGER_SSH_USER in this GitHub Environment}"
+          : "${SSH_PORT:?Set HOSTINGER_SSH_PORT in this GitHub Environment}"
+          : "${SSH_PRIVATE_KEY:?Set HOSTINGER_SSH_PRIVATE_KEY in this GitHub Environment}"
+          : "${SSH_KNOWN_HOSTS:?Set HOSTINGER_SSH_KNOWN_HOSTS in this GitHub Environment}"
+          : "${APP_PATH:?Set HOSTINGER_APP_PATH in this GitHub Environment}"
+
+          if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
+            echo "HOSTINGER_SSH_PORT must be between 1 and 65535." >&2
+            exit 1
+          fi
+          if [[ ! "$APP_PATH" =~ ^/[A-Za-z0-9._/-]+$ || "$APP_PATH" == *"/../"* || "$APP_PATH" == */.. ]]; then
+            echo "HOSTINGER_APP_PATH must be a safe absolute server path without parent-directory segments." >&2
+            exit 1
+          fi
+
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/deploy_key"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/deploy_key" "$HOME/.ssh/known_hosts"
+
+          SSH_TARGET="$SSH_USER@$SSH_HOST"
+          SSH_OPTIONS=(-p "$SSH_PORT" -i "$HOME/.ssh/deploy_key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" \
+            "test -d '$APP_PATH' && test -f '$APP_PATH/.env' && test -w '$APP_PATH'"
+
+      - name: Upload application files
+        if: ${{ vars.HOSTINGER_APP_PATH != '' }}
+        env:
+          SSH_HOST: ${{ secrets.HOSTINGER_SSH_HOST }}
+          SSH_USER: ${{ secrets.HOSTINGER_SSH_USER }}
+          SSH_PORT: ${{ secrets.HOSTINGER_SSH_PORT }}
+          APP_PATH: ${{ vars.HOSTINGER_APP_PATH }}
+        run: |
+          set -euo pipefail
+          SSH_TARGET="$SSH_USER@$SSH_HOST"
+          SSH_OPTIONS=(-p "$SSH_PORT" -i "$HOME/.ssh/deploy_key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          tar -czf - \
+            --exclude='./.git' \
+            --exclude='./.github' \
+            --exclude='./tests' \
+            --exclude='./node_modules' \
+            --exclude='./.env' \
+            --exclude='./storage' \
+            . | ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" "tar -xzf - -C '$APP_PATH'"
+
+      - name: Run Laravel migrations and optimize
+        if: ${{ vars.HOSTINGER_APP_PATH != '' }}
+        env:
+          SSH_HOST: ${{ secrets.HOSTINGER_SSH_HOST }}
+          SSH_USER: ${{ secrets.HOSTINGER_SSH_USER }}
+          SSH_PORT: ${{ secrets.HOSTINGER_SSH_PORT }}
+          APP_PATH: ${{ vars.HOSTINGER_APP_PATH }}
+          PHP_BIN: ${{ vars.HOSTINGER_PHP_BIN }}
+        run: |
+          set -euo pipefail
+          PHP_BIN="${PHP_BIN:-php}"
+          if [[ ! "$PHP_BIN" =~ ^[A-Za-z0-9_./-]+$ ]]; then
+            echo "HOSTINGER_PHP_BIN must be a command or absolute path." >&2
+            exit 1
+          fi
+          SSH_TARGET="$SSH_USER@$SSH_HOST"
+          SSH_OPTIONS=(-p "$SSH_PORT" -i "$HOME/.ssh/deploy_key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$HOME/.ssh/known_hosts")
+          ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" \
+            "cd '$APP_PATH' && '$PHP_BIN' artisan optimize:clear && '$PHP_BIN' artisan migrate --force && '$PHP_BIN' artisan optimize"
