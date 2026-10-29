@@ -53,3 +53,17 @@ git push origin production
 ```
 
 Use separate server-side `.env` files and databases for staging and production. Set `APP_ENV=staging` on the staging server and `APP_ENV=production` on the live server; keep `APP_DEBUG=false` on both public sites. Create each database and database user in Hostinger before configuring the corresponding `.env`. Laravel migrations create or update tables inside that database; they do not provision the database itself.
+
+## GitHub Actions deployment to Hostinger
+
+Pushing to `staging` or `production` runs the test suite. After tests pass, the `Test and deploy to Hostinger` workflow deploys to the matching GitHub Environment. Deployment is skipped until that environment has a `HOSTINGER_APP_PATH` variable.
+
+Create GitHub Environments named exactly `staging` and `production` under **Settings → Environments**. In each environment, configure:
+
+- Variable `HOSTINGER_APP_PATH`: the existing absolute server directory containing the Laravel app's `artisan` file. It must be separate for staging and production.
+- Optional variable `HOSTINGER_PHP_BIN`: the PHP CLI command on the server; defaults to `php`.
+- Secrets `HOSTINGER_SSH_HOST`, `HOSTINGER_SSH_USER`, `HOSTINGER_SSH_PORT`, `HOSTINGER_SSH_PRIVATE_KEY`, and `HOSTINGER_SSH_KNOWN_HOSTS`.
+
+The target directory must already exist, be writable by the SSH user, and contain its environment-specific `.env` file before the first deployment. Configure the site's document root to point to that app directory's `public` folder. Keep each server `.env` and database separate; the workflow deliberately preserves `.env` and `storage`, and runs `php artisan migrate --force` after uploading.
+
+Add the SSH private key only as the `HOSTINGER_SSH_PRIVATE_KEY` GitHub Environment secret. Set `HOSTINGER_SSH_KNOWN_HOSTS` to the server's verified known-hosts entry; verify its fingerprint with Hostinger before trusting it. Do not put keys, passwords, database credentials, or `.env` contents in the repository.
