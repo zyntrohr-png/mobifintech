@@ -54,6 +54,23 @@ git push origin production
 
 Use separate server-side `.env` files and databases for staging and production. Set `APP_ENV=staging` on the staging server and `APP_ENV=production` on the live server; keep `APP_DEBUG=false` on both public sites. Create each database and database user in Hostinger before configuring the corresponding `.env`. Laravel migrations create or update tables inside that database; they do not provision the database itself.
 
+## Paytm staging checkout
+
+The staging branch includes a sandbox-only Paytm hosted checkout for a fixed INR 1.00 test order. It signs the request on the server with Paytm's official `paytm/paytmchecksum` package and verifies the callback signature and order amount before recording the result. It does not collect card details or fulfill orders.
+
+Set these values only in the staging server's ignored `.env` file (or your local staging `.env` for development), then run `php artisan config:clear`:
+
+```dotenv
+PAYTM_ENVIRONMENT=TEST
+PAYTM_MERCHANT_ID=your_rotated_sandbox_merchant_id
+PAYTM_MERCHANT_KEY=your_rotated_sandbox_merchant_key
+PAYTM_MERCHANT_WEBSITE=WEBSTAGING
+PAYTM_INDUSTRY_TYPE=Retail
+PAYTM_CHANNEL_ID=WEB
+```
+
+The callback URL must be publicly reachable over HTTPS for a real sandbox round trip. A local `localhost` URL cannot receive Paytm's callback. Never put merchant credentials in Git, a GitHub workflow, or chat. Any key previously shared outside a secret store should be rotated before use. This test checkout is not intended for production payments.
+
 ## GitHub Actions deployment to Hostinger
 
 Pushing to `staging` or `production` runs the test suite. After tests pass, the `Test and deploy to Hostinger` workflow deploys to the matching GitHub Environment. Deployment is skipped until that environment has a `HOSTINGER_APP_PATH` variable.
